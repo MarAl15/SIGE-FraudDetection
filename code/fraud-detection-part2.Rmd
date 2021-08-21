@@ -1,0 +1,337 @@
+---
+title: "Preprocesamiento y clasificación con conjunto de datos de detección de transacciones fraudulentas (2ª Parte)"
+author: "Mª del Mar Alguacil Camarero"
+output:
+  html_document:
+    df_print: paged
+html_notebook: default
+---
+
+<br/>
+**Índice**
+
+[1ª Parte](fraud-detection-part1.html)
+
+* [Introducción](fraud-detection-part1.html#Introducción)
+* [Estado del conjunto de datos](fraud-detection-part1.html#Estado del conjunto de datos)
+* [Selección subconjunto](fraud-detection-part1.html#Selección subconjunto)
+
+[2ª Parte](fraud-detection-part2.html)
+
+* [Estudio previo](#Estudio previo)
+  * [Imputación de datos perdidos](#Imputación de datos perdidos)
+  * [Predicciones subconjunto](#Predicciones subconjunto)
+  
+[3ª Parte](fraud-detection-part3.html)
+
+* [Preprocesamiento](fraud-detection-part3.html#Preprocesamiento)
+  * [Variables con valores perdidos](fraud-detection-part3.html#Variables con valores perdidos)
+  * [Variables con mucha diversidad en sus valores](fraud-detection-part3.html#Variables con mucha diversidad en sus valores)
+  * [Tratamiento de valores atípicos](fraud-detection-part3.html#Tratamiento de valores atípicos)
+  * [Variables con poca diversidad en sus valores](fraud-detection-part3.html#Variables con poca diversidad en sus valores)
+  * [Selección de ejemplos](fraud-detection-part3.html#Selección de ejemplos)
+  * [Normalización](fraud-detection-part3.html#Normalización)
+  * [Variables correladas](fraud-detection-part3.html#Variables correladas)
+  * [Análisis de componentes principales](fraud-detection-part3.html#Análisis de componentes principales)
+* [Comparación de modelos (subconjunto)](fraud-detection-part3.html#Comparación de modelos (subconjunto))
+
+[4ª Parte](fraud-detection-part4.html)
+
+* [Balanceo de clases](fraud-detection-part4.html#Balanceo de clases)
+* [Entrenamiento](fraud-detection-part4.html#Entrenamiento)
+* [Predicción](fraud-detection-part4.html#Predicción)
+  * [Random Forest](fraud-detection-part4.html#Random Forest)
+  * [Naïve Bayes](fraud-detection-part4.html#Naïve Bayes)
+  * [Máquinas de Vectores de Soporte](fraud-detection-part4.html#Máquinas de Vectores de Soporte)
+* [Discusión de resultados](fraud-detection-part4.html#Discusión de resultados)
+* [Conclusiones](fraud-detection-part4.html#Conclusiones)
+
+
+
+## Estudio previo
+
+Inicialmente cargamos los archivos creados en las secciones anteriores.
+
+```{r message=FALSE}
+library(tidyverse)
+library(funModeling)
+```
+  
+```{r}
+# Conjunto de datos combinado
+data <- read_csv('.tmp/join.csv')
+
+# Identificadores del conjunto de entrenamiento
+load(".tmp/trainID.RData") # data_train_ID
+# Identificadores del conjunto de validación
+load(".tmp/validationID.RData") # data_val_ID
+```
+
+Ninguno de nuestros métodos trabaja con valores perdidos y nos encontramos con el problema de que todas las muestras tienen valores perdidos. En consecuencia, deberemos de realizar una imputación de datos previa.
+
+### Imputación de datos perdidos
+Para la imputación de valores seguiremos los siguientes pasos para las variables numéricas y lógicas sobre el conjunto completo:
+
+1. Si sólo existe un único valor en la columna y el resto son valores perdidos, asignamos otro valor distinto a dicha columna para completas los NAs. En este caso, se ha decidido sumar uno al único tipo de valor que haya.
+2. Si la probabilidad de ser valor perdido es mayor al 74%, se aplicará el algoritmo `missForest` que emplea RandomForest sobre el conjunto completo. 
+
+Para estimar el resto de valores perdidos se usará KNN sobre un subconjunto, ya que daba problemas aplicándolo sobre el conjunto total.
+
+Por otro lado, para las variables de tipo carácter, los valores perdidos se remplazaran por cadenas vacias.
+
+Se ha descartado probar a utilizar la libreria `mice` por el consumo enorme de tiempo que conllevaba.
+```{r message=FALSE}
+library(missForest)
+library(caret)
+library(RANN)  # knnImpute
+```
+
+```{r results = 'hide'}
+# Función que rellena los valores perdidos de las columnas númericas y lógicas considerando el conjunto completo. Además de las variables de tipo carácter.
+impute_val_total <- function(data_na) {
+  data_cleared <- data_na
+  
+  #    VALORES NUMÉRICOS
+  # ========================
+  data_num <- data_cleared %>% select_if(function(col) (is.numeric(col) | is.logical(col)) & any(is.na(col)))
+  status   <- df_status(data_num)
+  rm(data_num)
+  
+  # Seleccionamos los valores únicos
+  uniq_cols <- status %>%
+               filter(unique == 1) %>%
+               select(variable)
+  # Insertamos un nuevo valor para remplazar los valores perdidos
+  for (var in uniq_cols$variable) {
+    missing <- (is.na(data_cleared[,var])) # Vector booleano
+    x.obs <- sapply(names(table(data_cleared[,var])), as.integer) # Datos no NA
+    data_cleared[missing,var] <- x.obs+1
+  }
+  rm(uniq_cols, missing, x.obs, var)
+  
+  # Seleccionamos los valores con más de un 74% de valores perdidos
+  na_cols <- status %>%
+             filter(p_na > 74) %>%
+             #filter(unique > 5) %>%
+             select(variable)
+  if (nrow(na_cols)!=0){
+    matrix_na_cols <- as.matrix(sapply(data_cleared%>%select(one_of(na_cols$variable)), as.numeric)) 
+    matrix_no_na_cols <- missForest(matrix_na_cols, maxiter = 1, ntree = 100)
+    data_cleared[,na_cols$variable] <- as.data.frame(matrix_no_na_cols$ximp) %>% 
+                                       select(one_of(na_cols$variable))
+    rm(na_cols, matrix_no_na_cols, matrix_na_cols, status)
+  }
+  
+  
+  #    VALORES DE TIPO CARÁCTER
+  # ==============================
+  data_string <- data_cleared %>% select_if(function(col) is.character(col) & any(is.na(col)))
+  status   <- df_status(data_string)
+  rm(data_string)
+  for (var in status$variable) {
+    missing <- (is.na(data_cleared[,var])) # Vector booleano
+    data_cleared[missing,var] <- ""
+  }
+  
+  return(data_cleared)
+}
+
+data_bit_cleared <- impute_val_total(data)
+status <- df_status(data_bit_cleared)
+```
+```{r}
+status
+```
+
+Los siguientes pasos serán seguidos considerando un subconjunto:
+
+1. Si la probabilidad de ser valor perdido es mayor al 74% o si sólo existe un único valor en la columna y el resto son perdidos, se aplicará reemplazamiento aleatorio considerando los valores de la columna del conjunto completo.
+2. Si la probabilidad de ser un valor perdido es igual o menor de 74%, utilizamos el algoritmo de k vecinos más cercanos (KNN) que suele dar buenos resultados y consume poco tiempo.
+```{r results = 'hide'}
+# Imputar valores sobre un subconjunto
+impute_val_subset <- function(data_na, data_total) {
+  data_cleared <- data_na
+  
+  # Seleccionamos los valores numéricos y lógicos
+  data_num <- data_na %>% select_if(function(col) (is.numeric(col) | is.logical(col)) & any(is.na(col)))
+  status   <- df_status(data_num)
+  
+  # Seleccionamos los valores con más de un 74% de valores perdidos 
+  na_cols <- status %>%
+             filter(p_na > 74) %>%
+             select(variable)
+  # Seleccionamos los valores únicos
+  uniq_cols <- status %>%
+               filter(unique == 1) %>%
+               select(variable)
+  repl_cols <- bind_rows( list(na_cols, uniq_cols))
+  # Realizamos un remplazamiento aleatorio considerando toda la columna del conjunto completo
+  for (var in repl_cols$variable) {
+    missing <- (is.na(data_na[,var])) # Vector booleano
+    n.missing <- sum(missing) # Número de NA’s
+    #x.obs <- data_total[!missing, var] 
+    x.obs <- sapply(names(table(data[,var])), as.integer) # Datos no NA considerando el conjunto completo
+    data_cleared[missing,var] <- sample(x.obs, n.missing, replace = T)
+  }
+  
+  # Aplicamos el algoritmo KNN con las columnas que tienen un 74% o menos de valores perdidos
+  matrix_repl_cols <- as.matrix(sapply(data_num%>%select(-one_of(repl_cols$variable)), as.numeric)) 
+  pre_proc_values <- preProcess(matrix_repl_cols, method = c("knnImpute"))
+  matrix_repl_cols <- predict(pre_proc_values, newdata = matrix_repl_cols)
+  matrix_repl_cols
+  data_tmp <- as.data.frame(matrix_repl_cols)
+  data_cleared[,names(data_tmp)] <- data_tmp
+  
+  return(data_cleared)
+}
+```
+
+En este caso, sólo lo aplicamos en los conjuntos de entrenamiento y validación para realizar los próximos estudios.
+```{r results = 'hide'}
+subsets_cleared <- impute_val_subset(data_bit_cleared[data_bit_cleared$TransactionID %in% c(data_train_ID, data_val_ID), ], data_bit_cleared)
+status <- df_status(subsets_cleared)
+```
+```{r}
+status
+```
+
+Eliminamos los conjuntos de datos ya que en este _script_ no se van usar más, evitado así además que R se sature.
+```{r}
+rm(data, data_bit_cleared, status)
+```
+
+
+### Predicciones subconjunto
+
+Prosigamos con el análisis predictivo teniendo en cuenta dicho subconjunto con todas las variables sin valores perdidos.
+```{r message=FALSE}
+library(doMC)
+```
+
+Modificamos la variable principal para poder entrenar los diferentes subconjuntos
+```{r}
+subset <- subsets_cleared %>%
+          mutate(isFraud = as.factor(ifelse(isFraud == 1, 'Yes', 'No')))
+subset_train <- subset[subset$TransactionID %in% data_train_ID, ]
+subset_val <- subset[subset$TransactionID %in%  data_val_ID, ]
+rm(subset, subsets_cleared)
+```
+
+Almacenamos los subconjuntos y las funciones para los posteriores scripts.
+```{r}
+save(subset_train, file=".tmp/subsetTrain.RData")
+save(subset_val,   file=".tmp/subsetVal.RData")
+save(impute_val_total,  file=".tmp/ImputeValTotal.RData")
+save(impute_val_subset, file=".tmp/ImputeValSubset.RData")
+```
+
+#### Random Forest
+Una vez preparados los datos, se definen los parámetros del algoritmo de aprendizaje con [<tt>trainControl</tt>](https://topepo.github.io/caret/model-training-and-tuning.html#control). En este caso, la implementación de Random Forest en [<tt>caret</tt>](http://topepo.github.io/caret/). Este algoritmo nos permite incorporar muchos árboles de decisión en lugar de ajustar sólo uno. Se crea, por tanto, un bosque (_forest_). Además, se denomina _random_ porque selecciona aleatoriamente $m$ predictores para la construcción de los árboles.
+
+En R puede ser implementado a través de la biblioteca _randomForest_ o _ranger_. El método _randomForest_  sólo permite optimizar el parámetro _mtry_, mientras que _ranger_ posee tres hiperparámetros controlables:
+
+- `mtry`: número de predictores seleccionados aleatoriamente en cada árbol.
+- `min.node.size`: tamaño mínimo que debe tener un nodo para ser dividido.
+- `splitrule`: criterio de división (por defecto gini).
+
+[<tt>expand.grid</tt>](https://topepo.github.io/caret/model-training-and-tuning.html#grids), el nombre del parámetro y, a continuación, un vector o una lista de valores.
+ 
+ 
+Las curvas ROC (_Receiver Operating Characteritic curve_) permiten evaluar, en problemas de clasificación binaria, cómo varia la proporción de verdaderos positivos (**sensibilidad**) y la de falsos positivos (**especificidad**) dependiendo del punto de corte de probabilidad empleado en las asignaciones. El gráfico resultante nos permite identificar el punto de corte que consigue un mejor equilibrio sensibilidad-especificidad. Además de esto, la curva ROC, en concreto el área bajo la curva (AUC), puede emplearse como métrica para evaluar modelos. Un modelo que clasifica perfectamente las dos clases tendría un 100% de sensibilidad y especificidad, por lo que el área bajo la curva sería de 1.
+
+En _caret_, se puede sustituir la métrica _Accuracy_ empleada por defecto en problemas de clasificación y calcular en su lugar el AUC. Para ello, se tienen que indicar los argumentos _summaryFunction_ = twoClassSummary y _classProbs_ = TRUE en el control de entrenamiento. El segundo argumento es necesario porque el cálculo de la curva ROC requiere las probabilidades predichas para cada clase.
+```{r}
+# Paralelización del proceso
+registerDoMC(cores = 2)
+
+# Definición del entrenamiento
+ctrl <- trainControl(summaryFunction = twoClassSummary, classProbs = TRUE, allowParallel = TRUE)
+
+## - RandomForest
+rangerParametersGrid <- expand.grid(mtry = c(2,3),
+                               min.node.size = c(5, 10),
+                               splitrule = "gini")
+```
+
+Una vez listos todos los elementos necesarios para el entrenamiento, utilizamos [<tt>subset_train</tt>]. En este caso, queremos predecir _isFraud_ a partir del resto de variables: <tt>isFraud ~ .</tt>. La métrica para estudiar la calidad del clasificar es la curva ROC.
+```{r}
+# Ajuste del modelo 
+set.seed(15)
+modelo_rf <- train(isFraud ~ .,
+                   data = subset_train,
+                   method = "ranger",
+                   tuneGrid = rangerParametersGrid,
+                   metric = "ROC",
+                   trControl = ctrl,
+                   # Número de árboles ajustados
+                   num.trees = 100)
+```
+
+El modelo de predicción se almacena en el objeto generado por `modelo_rf`, junto a otros valores relevantes, como las métricas de entrenamiento. En este ejemplo se puede ver que el `ROC` obtenido con _mtry_ = 3, _splitrule_ = gini y _min.node.size_ = 5 es más alto; por tanto, el modelo final será esta combinación.
+```{r}
+modelo_rf
+```
+
+El modelo final, con mejores resultados, se almacena en _modelo_rf$finalModel_. 
+```{r}
+modelo_rf$finalModel
+```
+
+#### Naïve Bayes
+El método `nb` de caret emplea la función `NaiveBayes` del paquete `klaR` con los siguientes tres hiperparámetros:
+
+* `usekernel`: TRUE si deseamos emplear un _kernel_ que estime la densidad. En caso contrario, asume una distribución de densidad gaussiana.
+* `fL`: factor de corrección de Laplace. Especificamos 0 si no deseamos aplicar ninguna corrección.
+* `adjust`: parámetro pasado a la función density si `usekernel = TRUE`.
+
+
+```{r}
+## - Naive Bayes
+#nbParametersGrid <- expand.grid(usekernel = FALSE, fL = 0 , adjust = 0)
+
+# Ajuste del modelo 
+#set.seed(15)
+#modelo_nb <- train(isFraud ~ ., 
+#                   data = subset_train,
+#                   method = "nb",
+#                   trControl = nbParametersGrid,
+#                   tuneGrid = nbParametersGrid)
+```
+
+Se descarta temporalmente por problemas con la varianza.
+
+#### Máquinas de vectores de soporte
+El método `svmRadial` de caret emplea la función `ksvm` del paquete kernlab. Este algoritmo emplea parámetros:
+
+* `sigma`: coeficiente del _kernel_ radial.
+* `C`: penalización por violaciones del margen del hiperplano.
+
+
+```{r}
+## - SVM
+#set.seed(15)
+#svmParametersGrid <- expand.grid(sigma = c(0.06609042),
+#                                  C = c(1))
+#modelo_svm <- train(isFraud ~ .,
+#                   data = subset_train,
+#                   method = "svmRadial",
+#                   tuneGrid = svmParametersGrid,
+#                   metric = "ROC",
+#                   trControl = ctrl)
+```
+
+Se descarta temporalmente por el consumo de tiempo.
+
+[**> Viaja a la siguiente parte**](fraud-detection-part3.html)
+
+<script type="text/javascript">
+  <!-- https://stackoverflow.com/questions/39281266/use-internal-links-in-rmarkdown-html-output/39293457 -->
+  // When the document is fully rendered...
+  $(document).ready(function() {
+    // ...select all header elements...
+    $('h1, h2, h3, h4, h5').each(function() {
+      // ...and add an id to them corresponding to their 'titles'
+      $(this).attr('id', $(this).html());
+    });
+  });
+</script>
