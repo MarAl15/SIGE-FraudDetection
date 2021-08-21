@@ -1,0 +1,261 @@
+---
+title: "Preprocesamiento y clasificación con conjunto de datos de detección de transacciones fraudulentas (1ª Parte)"
+author: "Mª del Mar Alguacil Camarero"
+output:
+  html_document:
+    df_print: paged
+html_notebook: default
+---
+
+**Dataset:** [ieee-fraud-detection](https://www.kaggle.com/c/ieee-fraud-detection/data)
+
+**En este problema analizaremos qué tipos de operaciones tuvieron más probabilidades de ser fraudulentas. Para ello, aplicaremos técnicas de aprendizaje automático que nos permitirán predecir qué transacciones realizadas de manera online fueron fraudulentas.**
+
+En primer lugar, nos centraremos en el preprocesamiento de los datos utilizando [`tidyverse`](https://www.tidyverse.org), como se explica y detalla en la sección dedicada a este fin. A continuación pasaremos a estudiar la creación de modelos de clasificación Naïve Bayes, SVM y Random Forest con [`caret`](http://topepo.github.io/caret/).
+
+<br/>
+**Índice**
+
+[1ª Parte](fraud-detection-part1.html)
+
+* [Introducción](#Introducción)
+* [Estado del conjunto de datos](#Estado del conjunto de datos)
+* [Selección subconjunto](#Selección subconjunto)
+
+[2ª Parte](fraud-detection-part2.html)
+
+* [Estudio previo](fraud-detection-part2.html#Estudio previo)
+  * [Imputación de datos perdidos](fraud-detection-part2.html#Imputación de datos perdidos)
+  * [Predicciones subconjunto](fraud-detection-part2.html#Predicciones subconjunto)
+
+[3ª Parte](fraud-detection-part3.html)
+
+* [Preprocesamiento](fraud-detection-part3.html#Preprocesamiento)
+  * [Variables con valores perdidos](fraud-detection-part3.html#Variables con valores perdidos)
+  * [Variables con mucha diversidad en sus valores](fraud-detection-part3.html#Variables con mucha diversidad en sus valores)
+  * [Tratamiento de valores atípicos](fraud-detection-part3.html#Tratamiento de valores atípicos)
+  * [Variables con poca diversidad en sus valores](fraud-detection-part3.html#Variables con poca diversidad en sus valores)
+  * [Selección de ejemplos](fraud-detection-part3.html#Selección de ejemplos)
+  * [Normalización](fraud-detection-part3.html#Normalización)
+  * [Variables correladas](fraud-detection-part3.html#Variables correladas)
+  * [Análisis de componentes principales](fraud-detection-part3.html#Análisis de componentes principales)
+* [Comparación de modelos (subconjunto)](fraud-detection-part3.html#Comparación de modelos (subconjunto))
+
+
+[4ª Parte](fraud-detection-part4.html)
+
+* [Balanceo de clases](fraud-detection-part4.html#Balanceo de clases)
+* [Entrenamiento](fraud-detection-part4.html#Entrenamiento)
+* [Predicción](fraud-detection-part4.html#Predicción)
+  * [Random Forest](fraud-detection-part4.html#Random Forest)
+  * [Naïve Bayes](fraud-detection-part4.html#Naïve Bayes)
+  * [Máquinas de Vectores de Soporte](fraud-detection-part4.html#Máquinas de Vectores de Soporte)
+* [Discusión de resultados](fraud-detection-part4.html#Discusión de resultados)
+* [Conclusiones](fraud-detection-part4.html#Conclusiones)
+
+
+
+## Introducción
+El problema consiste en predecir si una transacción online es fraudulenta o no (_isFraud_) a partir del resto de variables. Los datos están separados en dos ficheros:
+
+* **_transaction:_** con los datos de la propia transacción (393 variables + 1 identificador de transacción).
+* **_identity:_** con los datos de identidad de la persona que realiza la transacción (40 variables + 1 identificador de transacción asociada).
+
+Ambos ficheros pueden combinarse a través del atributo `TransactionID`. Sin embargo, no todas las transacciones tienen dicho valor asociado, por lo que se estudiará la posibilidad de eliminar aquellas transacciones que no estén identificadas. <!-- con el objetivo de reducir la cantidad de datos, además de poder considerar las características de ambos ficheros y tener menos datos perdidos. -->
+
+Como se verá en la próxima sección donde mostramos el estado del conjunto de datos, partimos de una cantidad de datos inmanejable para poder calcular un modelo entrenado con algún algoritmo considerando el conjunto completo. Por tanto, debemos proceder inicialmente a una eliminación masiva de estos. Sin embargo, la selección a mano se hace demasiado tediosa para realizar un estudio exhaustivo de las variables que pensamos que podrían aportar mayor contenido. En consecuencia, se ha decidido recurrir a métodos menos sofisticados y más intuitivos que nos permitan reducir el gran número de variables, esperando que no perdamos gran cantidad de información relevante.
+
+Para estimar la perdida de información que podemos obtener al eliminar distintos conjuntos de variables, se selecciona un subconjunto balanceado y sin valores perdidos al que se le aplicará los distintos métodos de predicción. En este caso, se ha decidido utilizar los siguientes [algoritmos](https://rpubs.com/Joaquin_AR/383283):
+
+* **Naïve Bayes:** utiliza el teorema de Bayes para calcular las probabilidades condicionales de que una observación pertenezca a cada una de las clases dadas unas evidencias (valores de los predictores). Se debe tener en cuenta que algoritmo asume que las variables son independientes. Aunque en la práctica, esta asunción no suele cumplirse, esta aproximación puede resultar muy efectiva.
+
+* **Máquinas de Vectores de Soporte (SVM):** realiza la clasificación encontrando el hiperplano que maximiza el margen entre las dos clases. Los ejemplos que definen el hiperplano son los llamados
+**vectores de soporte**. SVM ha resultado ser uno de los mejores clasificadores para un amplio abanico de situaciones, por lo que se ha decidito utilizar para esta práctica ya que se considera uno de los referentes dentro del ámbito de aprendizaje estadístico y _machine learning_.
+
+* **Random Forest:** modificación del proceso de _bagging_, el cual se basa en el hecho de que promediando un conjunto de modelos se consigue reducir la varianza, que consigue mejores resultados gracias a la decorrelación que realiza durante el proceso en los árboles generados.
+
+Para crear un modelo de clasificación de forma automática utilizaremos  [`caret`](http://topepo.github.io/caret/). En esta actividad utilizaremos Naïve Bayes con [`klaR`](https://rpubs.com/Joaquin_AR/383283), SVM con [`kernlab`](https://rpubs.com/Joaquin_AR/383283) y Random Forest con [`ranger`](https://rpubs.com/Edimer/536034).
+
+```{r message=FALSE}
+library(caret)
+```
+
+Por último, destacar que se ha decidio dividir el proceso de predicción en varios ficheros para evitar que la compilación de los diferentes archivos se hiciese demasiado larga y se viese afectada por errores que obligasen a realizarla de nuevo, perdiendo otra cantidad de tiempo considerable. Al final de cada uno de estos documentos, se procederá a almacenar la información (variables y conjuntos de datos) que se considere necesaria en la carpeta `.tmp` para permitir al siguiente partir de dicho fichero, sin tener que volver a realizar todo el procedimiento de nuevos. Los diferentes documentos se han organizado de la siguiente manera:
+
+1. Introducción, análisis del conjunto, combinación de datos y extracción del subconjunto.
+2. Estudio previo realizando una imputación da valores para poder aplicar los distintos algoritmos al subconjunto completo.
+3. Preprocesamiento evaluando la pérdida de información que podemos obtener.
+4. Balanceado, entrenamiento, predicción y discusión de resultados.
+
+```{r}
+# Creamos la carpeta si no existe
+dir.create('.tmp', showWarnings = FALSE)
+```
+
+## Estado del conjunto de datos
+
+Inicialmente se procede a la lectura y evaluación de la calidad del conjunto de datos observando las características de las diferentes columnas.
+```{r message=FALSE}
+library(tidyverse)
+library(funModeling)
+```
+
+```{r}
+data_folder <- normalizePath(file.path("..", "data"))
+```
+
+En el fichero de _train_identity_ tenemos 144233 filas con 23 variables numéricas (además del identificador de la transacción), 13 de tipo texto y 4 lógicas. En este caso, el identificador está siempre especificado y es único. Se puede observar además que existen varias columnas en las que la probabilidad de encontrar valores perdidos entorno al 96%. Estas serán eleminadas posteriormente.
+```{r}
+data_identity <- read_csv(paste(data_folder,'train_identity.csv', sep='/'))
+# Número de transacciones x número de variables
+dim(data_identity)
+```
+```{r results = 'hide'}
+# Análisis de variables
+status <- df_status(data_identity)
+```
+```{r}
+status
+```
+
+
+En el fichero relacionado con las transacciones (_train_transaction_), nos encontramos con 392 variales numéricas, 6 de tipo texto y 8 lógicas.
+```{r}
+data_transaction <- read_csv(paste(data_folder,'train_transaction.csv', sep='/'))
+# Número de transacciones x número de variables
+dim(data_transaction)
+```
+```{r results = 'hide'}
+# Análisis de variables
+status <- df_status(data_transaction)
+```
+```{r}
+status
+```
+
+A continuación, en un intento de reducir la enorme cantidad de datos, estudiamos la viabilidad de considerarar sólo las transacciones cuyo identificador se encuentra en ambos _datasets_. Por lo que, unificamos ambos ficheros mediante la intersección del atributo _TransactionID_. 
+```{r}
+data <- merge(data_transaction,data_identity,by=c('TransactionID'), all=F)
+# Eliminamos las bases de datos que ya no necesitamos
+rm(data_identity)
+rm(data_transaction)
+
+# Número de transacciones x número de variables
+dim(data)
+```
+```{r results = 'hide'}
+# Análisis de variables
+status <- df_status(data)
+```
+```{r}
+status
+```
+Obtenemos un 92.15% de ceros en la columna de fraude (es decir, de ausencia de fraude) frente al 96.5% que se obtenía teniendo en cuenta el conjunto total. Se mantiene mas o menos el porcentaje de fraude, por lo que continuamos trabajando con dicho subconjunto que prodecemos a almacenarlo en el archivo _join.csv_.
+
+Sin embargo, antes de guardarlo eliminamos las columnas que no contienen ningún valor, o siempre es el mismo y no tienen valores perdidos ya que estas columnas no nos aportan ninguna información.
+```{r}
+# Seleccionamos las columnas con valores únicos o todos perdidos
+na_cols <- status %>%
+             filter(p_na == 100) %>%
+             select(variable)
+uniq_cols <- status %>%
+             filter(unique == 1) %>%
+             filter(p_na == 0) %>%
+             select(variable)
+# Eliminamos dichas columnas
+remove_cols <- bind_rows(
+  list(na_cols, uniq_cols)
+)
+# Eliminamos dichas variables
+data <- data %>%
+        select(-one_of(remove_cols$variable))
+  
+# Eliminamos las variables que ya no nos hacen falta
+rm(status, na_cols, uniq_cols, remove_cols)
+```
+
+
+```{r}
+write_csv(data, ".tmp/join.csv")
+```
+
+
+## Selección subconjunto
+
+Seleccionamos 5000 instancias del conjunto total, las cuales se dividiran a su vez es un subconjunto de entrenamiento y otro de validación para evaluar cómo afecta la eliminación de cada conjunto de variables. Es decir, tener una idea aproximada de cuánta pérdida de información se obtiene al suprimir dichas variables.
+
+Tener ambos conjuntos nos permite comprobar cómo de próximas son sus predicciones a los verdaderos valores de la variable de respuesta sin tener que tocar el conjunto de test. Necesitamos disponer de un conjunto de observaciones, de las que se conozca la variable respuesta, pero que no hayan participado en el ajuste del modelo.
+
+Ambos subconjuntos intentamos que estén balanceados a partir de un subconjunto con el menor número de datos perdidos posibles.
+```{r}
+subset <- data[which(rowMeans(!is.na(data)) > 0.99), ];
+print(c(length(which(subset$isFraud==1)), length(which(subset$isFraud==0))))
+subset <- data[which(rowMeans(!is.na(data)) > 0.9), ];
+print(c(length(which(subset$isFraud==1)), length(which(subset$isFraud==0))))
+subset <- data[which(rowMeans(!is.na(data)) > 0.85), ];
+print(c(length(which(subset$isFraud==1)), length(which(subset$isFraud==0))))
+subset <- data[which(rowMeans(!is.na(data)) > 0.836), ];
+print(c(length(which(subset$isFraud==1)), length(which(subset$isFraud==0))))
+
+# Eliminamos la variable data ya que en esta parte no la vamos a necesitar más
+rm(data)
+```
+
+```{r}
+set.seed(15);
+subset <- subset %>% 
+          group_by(isFraud) %>% 
+          sample_n(size = 2500);
+```
+```{r results = 'hide'}
+# Análisis de variables
+status <- df_status(subset)
+```
+```{r}
+status
+# Eliminamos la variable status
+rm(status)
+```
+
+El tamaño adecuado de las particiones depende en gran medida de datos y la seguridad que se necesite en la estimación del error, 80%-20% suele dar buenos resultados. El reparto debe hacerse de forma aleatoria o aleatoria-estratificada. 
+
+A continuación se divide el subconjunto en entrenamiento y test en un 80%-20%, que suele dar buenos resultado. Sin embargo, debemos tener en cuenta que el reparto debe hacerse de forma compensada, por ello utilizamos la función `createDataPartition` que garantiza una distribución aproximada por defecto.
+
+```{r}
+set.seed(15)
+# Se crean los índices de las observaciones de entrenamiento
+train <- createDataPartition(y = subset$isFraud, p = 0.8, list = FALSE, times = 1)
+data_train <- subset[train, ]
+data_val   <- subset[-train, ]
+
+prop.table(table(data_train$isFraud))
+prop.table(table(data_val$isFraud))
+
+# Eliminamos la variable subset y train
+rm(subset, train)
+```
+
+Por último, almacenamos los identificadores de las distintas transacciones del subconjunto en los ficheros en _trainID.RData_ y _validationID.RData_.
+```{r}
+data_train_ID <- data_train$TransactionID
+data_val_ID   <- data_val$TransactionID
+save(data_train_ID, file=".tmp/trainID.RData")
+save(data_val_ID,   file=".tmp/validationID.RData")
+```
+
+Cabe notar que se ha decidido guardar el identificar en vez del índice ya que posiblemente posteriormente se eliminen transacciones con la mayoría de valores nulos ya que se deberian predecir con otro algoritmo, lo que implicaría probablemente meter más ruido que la información que nos puede aportar.
+
+
+[**> Viaja a la siguiente parte**](fraud-detection-part2.html)
+
+<script type="text/javascript">
+  <!-- https://stackoverflow.com/questions/39281266/use-internal-links-in-rmarkdown-html-output/39293457 -->
+  // When the document is fully rendered...
+  $(document).ready(function() {
+    // ...select all header elements...
+    $('h1, h2, h3, h4, h5').each(function() {
+      // ...and add an id to them corresponding to their 'titles'
+      $(this).attr('id', $(this).html());
+    });
+  });
+</script>
