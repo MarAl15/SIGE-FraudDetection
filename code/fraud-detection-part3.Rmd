@@ -590,12 +590,10 @@ library(BBmisc)
 ```
 ```{r}
 data_bit_clear <- data_bit_clear[data_bit_clear$TransactionID %in% data_new$TransactionID, names(data_new)]
-data_new_num <- subset_na <- data_bit_clear %>% 
-                             select(-one_of(c("TransactionID", "isFraud"))) %>%
-                             select_if(is.numeric)
+data_new_num <- data_bit_clear %>%
+                select(-one_of(c("TransactionID", "isFraud"))) %>%
+                select_if(is.numeric)
 data_bit_clear[,names(data_new_num)] <- normalize(data_new_num, method = "range")
-
-rm(data_new_num)
 ```
 
 ### Variables correladas
@@ -660,6 +658,14 @@ rm(model, predictionValidationProb, roc_validation, auc, data_bit_clear, status)
 ```
 
 
+```{r}
+min_columns <- apply(data_new_num[names(data_new)[-1:-2]], 2, min)
+save(min_columns, file=".tmp/min_columns.RData")
+max_columns <- apply(data_new_num[names(data_new)[-1:-2]], 2, max)
+save(max_columns, file=".tmp/max_columns.RData")
+
+rm(min_columns, max_columns, data_new_num)
+```
 
 ### Análisis de componentes principales
 
