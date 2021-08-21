@@ -1,0 +1,857 @@
+---
+title: "Preprocesamiento y clasificación con conjunto de datos de detección de transacciones fraudulentas (3ª Parte)"
+author: "Mª del Mar Alguacil Camarero"
+output:
+  html_document:
+    df_print: paged
+html_notebook: default
+---
+
+<br/>
+**Índice**
+
+[1ª Parte](fraud-detection-part1.html)
+
+* [Introducción](fraud-detection-part1.html#Introducción)
+* [Estado del conjunto de datos](fraud-detection-part1.html#Estado del conjunto de datos)
+* [Selección subconjunto](fraud-detection-part1.html#Selección subconjunto)
+
+[2ª Parte](fraud-detection-part2.html)
+
+* [Estudio previo](fraud-detection-part2.html#Estudio previo)
+  * [Imputación de datos perdidos](fraud-detection-part2.html#Imputación de datos perdidos)
+  * [Predicciones subconjunto](fraud-detection-part2.html#Predicciones subconjunto)
+  
+[3ª Parte](fraud-detection-part3.html)
+
+* [Preprocesamiento](#Preprocesamiento)
+  * [Variables con valores perdidos](#Variables con valores perdidos)
+  * [Variables con mucha diversidad en sus valores](#Variables con mucha diversidad en sus valores)
+  * [Tratamiento de valores atípicos](#Tratamiento de valores atípicos)
+  * [Variables con poca diversidad en sus valores](#Variables con poca diversidad en sus valores)
+  * [Selección de ejemplos](#Selección de ejemplos)
+  * [Normalización](#Normalización)
+  * [Variables correladas](#Variables correladas)
+  * [Análisis de componentes principales](#Análisis de componentes principales)
+* [Comparación de modelos (subconjunto)](#Comparación de modelos (subconjunto))
+
+[4ª Parte](fraud-detection-part4.html)
+
+* [Balanceo de clases](fraud-detection-part4.html#Balanceo de clases)
+* [Entrenamiento](fraud-detection-part4.html#Entrenamiento)
+* [Predicción](fraud-detection-part4.html#Predicción)
+  * [Random Forest](fraud-detection-part4.html#Random Forest)
+  * [Naïve Bayes](fraud-detection-part4.html#Naïve Bayes)
+  * [Máquinas de Vectores de Soporte](fraud-detection-part4.html#Máquinas de Vectores de Soporte)
+* [Discusión de resultados](fraud-detection-part4.html#Discusión de resultados)
+* [Conclusiones](fraud-detection-part4.html#Conclusiones)
+
+
+
+# Preprocesamiento
+
+Inicialmente cargamos los archivos creados como en la sección anterior.
+
+```{r message=FALSE}
+library(tidyverse)
+library(funModeling)
+```
+  
+```{r results = 'hide'}
+# Conjunto de datos combinado
+data <- read_csv('.tmp/join.csv')
+status <- df_status(data)
+
+# Subconjunto de entrenamiento
+load(".tmp/subsetTrain.RData") # data_train_ID
+# Subconjunto de validación
+load(".tmp/subsetVal.RData") # data_val_ID
+```
+
+La enorme cantidad de datos nos impide trabajar directamente con todo el conjunto, además de la gran cantidad de características que se hace inmanejable seleccionarlas a mano. Por lo que debemos reducir datos de manera drástica, aun sabiendo que podemos perder información bastante importante.
+
+Estudiamos la perdida de información utilizando el algoritmo de Random Forest con los parámetros que mejor resultados nos dieron en la sección anterior.
+```{r message=FALSE}
+library(caret)
+library(doMC)
+library(pROC)
+```
+```{r}
+rf <- function(subset) {
+  # Paralelización del proceso
+  registerDoMC(cores = 2)
+  
+  # Definición del entrenamiento
+  ctrl <- trainControl(summaryFunction = twoClassSummary, classProbs = TRUE, allowParallel = TRUE)
+  
+  ## - RandomForest
+  rangerParametersGrid <- expand.grid(mtry = c(3),
+                                      min.node.size = c(5),
+                                      splitrule = "gini")
+  # Ajuste del modelo 
+  set.seed(15)
+  modelo_rf <- train(isFraud ~ .,
+                     data = subset,
+                     method = "ranger",
+                     tuneGrid = rangerParametersGrid,
+                     metric = "ROC",
+                     trControl = ctrl,
+                     # Número de árboles ajustados
+                     num.trees = 100)
+}
+# Almacenamos dicha función
+save(rf,  file=".tmp/RandomForest.RData")
+```
+
+### Variables con valores perdidos
+Procedemos, por tanto, a eliminar aquellas variables que contengan muchos valores perdidos que al remplazarlos podemos meter más ruido de lo que nos puede ayudar. 
+```{r messages=FALSE}
+# prob ∈ [0,100]: Probabilidad mínima de encontrarnos valores perdidos en una columna.
+# status: Estado de las variables considerando el conjunto completo.
+# data_na: Conjunto del que queremos eliminar las variables seleccionadas.
+remove_na <- function(prob, status, data_na){
+  # Seleccionamos las columnas con
+  ##   - muchos NAs
+  na_cols <- status %>%
+             filter(p_na > prob) %>%
+             select(variable)
+  
+  data_na <- data_na %>%
+             select(-one_of(na_cols$variable))
+  
+  return(data_na)
+}
+```
+
+Ciertas variables de tipo carácter dan problemas a la hora de aplicar RF debido a que ciertos valores de las variables no se encuentran en el subconjunto de entrenamiento pero si en el de validación. Por lo que procedemos a eliminar dichas variables, al menos temporalmente.
+
+```{r results='hide'}
+strings_data <-data  %>% select_if(is.character)
+strings_subset <- subset_train  %>% select_if(is.character)
+
+for (col in names(strings_data)) {
+  print(c("Característica: ", col))
+  print(c("   - Valores conjunto completo: ", names(table(strings_data[,col]))))
+  print(c("   - Valores subconjunto: ", names(table(strings_subset[,col]))))
+}
+
+
+#df_status(strings_data)
+#df_status(strings_subset)
+rm(col, strings_data, strings_subset)
+```
+
+```{r results = 'hide'}
+# Seleccionamos las columnas de caracteres que contienen todos los valores del conjunto principal
+data_new <- data %>% select(-one_of("P_emaildomain", "R_emaildomain", "id_30", "id_31", "id_33", "DeviceInfo"))
+subset_train <- subset_train  %>% select(-one_of("P_emaildomain", "R_emaildomain", "id_30", "id_31", "id_33", "DeviceInfo"))
+subset_val <- subset_val  %>% select(-one_of("P_emaildomain", "R_emaildomain", "id_30", "id_31", "id_33", "DeviceInfo"))
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+
+
+A continuación aplicamos diferentes probabilidades de tener valores perdidos, y comparamos teniendo en cuenta el AUC y las columnas que resultan eliminadas
+```{r message=FALSE}
+auc_list <- list()
+roc_validation <- list()
+
+for (p in c(50,60,70,80)) {
+  print(c("Probabilidad:", p))
+  train <- remove_na(p, status, subset_train)
+  print(c(" - Columnas eliminadas:", ncol(subset_train)-ncol(train)))
+  model <- rf(train)
+  val <- subset_val[, names(train)]
+  predictionValidationProb <- predict(model, val, type = "prob")
+  
+  auc <- roc(val$isFraud, predictionValidationProb[["Yes"]])
+  print(c(" - AUC:", round(auc$auc[[1]], 4)))
+  auc_list <- append(auc_list,list(auc))
+  roc_validation <- append(roc_validation, 
+                           list( plot.roc(auc, 
+                                 ylim=c(0,1),  
+                                 type = "S" , 
+                                 print.thres = TRUE, 
+                                 main=paste('Validation AUC:', round(auc$auc[[1]], 4)))
+                                )
+                           )
+}
+```
+
+```{r}
+roc.test(roc_validation[[1]],roc_validation[[3]])
+plot.roc(auc_list[[1]], type = "S", col="#1c61b6")
+lines.roc(auc_list[[3]], type = "S", col="#008600")
+rm(auc_list, roc_validation, auc, train, val, model, predictionValidationProb)
+```
+
+Se obtiene poca diferencia en el AUC, por lo que nos quedamos con las probabilidad de valores perdidos del 50% ya que con ella conseguimos eliminar 108 columnas.
+
+```{r results = 'hide'}
+# Eliminamos las distintas variables del conjunto total, así como de los subconjuntos
+subset_train <- remove_na(50, status, subset_train)
+subset_val <- subset_val %>% select(one_of(names(subset_train)))
+data_new <- data_new %>% select(one_of(names(subset_train)))
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+```{r}
+status
+```
+
+### Variables con mucha diversidad en sus valores
+
+Eliminamos aquellas variables que se mantengan con mucha variabilidad en sus valores ya que probablemente no aporten mucha información al tenerla tan dispersa.
+```{r messages=FALSE}
+# prob ∈ [0,1]: Probabilidad mínima de encontrarnos valores diferentes.
+# status: Estado de las variables considerando el conjunto completo.
+# data_dif: Conjunto del que queremos eliminar las variables seleccionadas.
+remove_dif <- function(prob, status, data_dif){
+  # Seleccionamos las columnas con
+  ##   - mucha diversidad
+  dif_cols <- status %>%
+              filter(variable != "TransactionID") %>%
+              filter(unique > prob * nrow(data_dif)) %>%
+              select(variable)
+  
+  data_dif <- data_dif %>%
+              select(-one_of(dif_cols$variable))
+  
+  return(data_dif)
+}
+```
+
+```{r message=FALSE}
+auc_list <- list()
+roc_validation <- list()
+
+for (p in c(0.5,0.6,0.7,0.8)) {
+  print(c("Probabilidad:", p))
+  train <- remove_dif(p, status, subset_train)
+  print(c(" - Columnas eliminadas:", ncol(subset_train)-ncol(train)))
+  model <- rf(train)
+  val <- subset_val[, names(train)]
+  predictionValidationProb <- predict(model, val, type = "prob")
+  
+  auc <- roc(val$isFraud, predictionValidationProb[["Yes"]])
+  print(c(" - AUC:", round(auc$auc[[1]], 4)))
+  auc_list <- append(auc_list,list(auc))
+  roc_validation <- append(roc_validation, 
+                           list( plot.roc(auc, 
+                                 ylim=c(0,1),  
+                                 type = "S" , 
+                                 print.thres = TRUE, 
+                                 main=paste('Validation AUC:', round(auc$auc[[1]], 4)))
+                                )
+                           )
+}
+```
+
+```{r}
+roc.test(roc_validation[[1]],roc_validation[[4]])
+plot.roc(auc_list[[1]], type = "S", col="#1c61b6")
+lines.roc(auc_list[[2]], type = "S", col="#008600")
+rm(auc_list, roc_validation, auc, train, val, model, predictionValidationProb)
+```
+
+Como se vuelve a obtener poca diferencia en los resultados, utilizamos de nuevo la opción que nos elimina más columnas.
+```{r results = 'hide'}
+# Eliminamos las distintas variables del conjunto total, así como de los subconjuntos
+subset_train <- remove_dif(0.5, status, subset_train)
+subset_val <- subset_val %>% select(one_of(names(subset_train)))
+data_new <- data_new %>% select(one_of(names(subset_train)))
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+```{r}
+status
+```
+
+### Tratamiento de valores atípicos
+
+En este apartado se identificará y tratará con los [Outliers](http://r-statistics.co/Outlier-Treatment-With-R.html), que son elementos que se consideran muy separados de la mayoría de valores de su variable. Se considera outlier si el valor excede 1.5*IQR de la variable.
+
+Para tratar con estos datos se han calculado los cuantiles 25 y 75 para ver los datos que están por debajo y por encima respectivamente. Y los cuantiles 5 y 95 para calcular el valor para asignar a los outliers. A continuación se ha calculad el rango para considerar si un valor es outlier. En caso de ser un outlier se le asigna el nuevo valor calculado.
+
+```{r}
+# data_total: Conjunto de datos al que queremos aplicar el tratamiento de outliers
+impute_outliers <- function(data_total){
+  for (var in names(data_total)){
+    col <- as.list(data_total[,var])[[var]]
+    
+    # Calculamos los cuantiles 25 y 75
+    qnt <- quantile(col, probs=c(.25, .75), na.rm = T)
+    # Calculamos los cuantiles 5 y 95 que serán los nuevos valores de los outliers
+    caps <- quantile(col, probs=c(.05, .95), na.rm = T)
+    
+    # H es el valor máximo que puede variar un valor del percientil 25 por debajo y 75 por encima. 
+    # Se calcula usando el rango intercuantil de la variable.
+    H <- 1.5 * IQR(col, na.rm = T)
+    
+    # Todos los valores de la columna que superen ese rango H se actualizan por los valores nuevos
+    col[col < (qnt[1] - H)] <- caps[1]
+    col[col > (qnt[2] + H)] <- caps[2]
+
+    # Actualizamos la columna en el conjunto de datos
+    data_total[,var] <- col
+  }
+  
+  return(data_total)
+}
+```
+
+```{r results='hide'}
+data_new_num <- data_new %>% 
+                select_if(is.numeric)
+data_new[,names(data_new_num)] <- impute_outliers(data_new_num)
+rm(data_new_num)
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+```{r}
+status
+```
+
+Modificamos los subconjuntos que se ven afectados por esto.
+```{r message=FALSE}
+library(caret)
+```
+```{r results='hide'}
+# Extraemos los identificadores del conjunto de entrenamiento y validación
+load(".tmp/trainID.RData") # data_train_ID
+load(".tmp/validationID.RData") # data_val_ID
+
+# Imputamos los valores perdidos de nuevo
+load(".tmp/ImputeValTotal.RData") # impute_val_total
+load(".tmp/ImputeValSubset.RData") # impute_val_subset
+data_bit_clear <- impute_val_total(data_new)
+```
+
+```{r results = 'hide'}
+# Actualizamos los conjuntos
+subsets_cleared <- impute_val_subset(data_bit_clear[data_bit_clear$TransactionID %in% c(data_train_ID, data_val_ID), ], data_new)
+status_subset <- df_status(subsets_cleared)
+```
+```{r}
+status_subset
+```
+
+```{r}
+subset <- subsets_cleared %>%
+          mutate(isFraud = as.factor(ifelse(isFraud == 1, 'Yes', 'No')))
+subset_train <- subset[subset$TransactionID %in% data_train_ID, ]
+subset_val <- subset[subset$TransactionID %in%  data_val_ID, ]
+rm(subset, subsets_cleared, status_subset)
+```
+
+
+Evaluamos los resultados y aparentemente obtenemos un pequeño empeoramiento.
+```{r}
+model <- rf(subset_train)
+predictionValidationProb <- predict(model, subset_val, type = "prob")
+
+auc <- roc(subset_val$isFraud, predictionValidationProb[["Yes"]])
+roc_validation <- plot.roc(auc, 
+                           ylim=c(0,1),  
+                           type = "S" , 
+                           print.thres = TRUE, 
+                           main=paste('Validation AUC:', round(auc$auc[[1]], 4))
+                          )
+
+```
+
+### Variables con poca diversidad en sus valores
+
+En un intento de seguir eliminando columnas a lo bestia, se ha decidido extraer las columnas con un gran número de ceros y compararlas con la de fraude, si coincide en su mayoria se prevé que puede ser de utilidad. Descartando, sin embargo, los valores que son casi todo ceros.
+```{r messages=FALSE}
+# prob ∈ [0,100]: Probabilidad mínima de encontrarnos valores nulos
+# prob_isFraud ∈ [0,1]: Porcentaje de coincidencia con la etiqueta.
+# status: Estado de las variables considerando el conjunto completo.
+# data_nuls: Conjunto del que queremos eliminar las variables seleccionadas.
+# data_total: Conjunto de datos total del que extraeremos la información.
+remove_nuls <- function(prob, prob_isFraud, status, data_nuls, data_total){
+  # Seleccionamos las columnas con
+  ##   - casi todo ceros
+  nul_cols <- status %>%
+              filter(p_zeros > 95) %>%
+              select(variable)
+  # Eliminamos dichas variables
+  data_nuls <- data_nuls %>%
+               select(-one_of(nul_cols$variable))
+  
+  ##   - muchos valores nulos
+  nul_cols <- status %>%
+              filter(p_zeros > prob) %>%
+              select(variable)
+  # Seleccionamos las columnas que coincidan en un determinado porcentaje con la columna de fraude
+  coincidence <- sapply(nul_cols$variable, function(x)  sum(data_total[,"isFraud"]==data_total[,x], na.rm=TRUE) >= prob_isFraud * nrow(data))
+  # Eliminamos dichas variables
+  data_nuls <- data_nuls %>%
+               select(-one_of(nul_cols$variable[which(coincidence==FALSE)]))
+  
+  return(data_nuls)
+}
+```
+
+```{r message=FALSE}
+auc_list <- list()
+roc_validation <- list()
+
+for (p in c(0.7, 0.8, 0.9)) {
+  for (p_fraud in c(0.6,0.7)) {
+    print(c("Probabilidad:", p))
+    print(c("Probabilidad de coincidir con la columna de fraude:", p_fraud))
+    train <- remove_nuls(p, p_fraud, status, subset_train, data_new)
+    print(c(" - Columnas eliminadas:", ncol(subset_train)-ncol(train)))
+    model <- rf(train)
+    val <- subset_val[, names(train)]
+    predictionValidationProb <- predict(model, val, type = "prob")
+    
+    auc <- roc(val$isFraud, predictionValidationProb[["Yes"]])
+    print(c(" - AUC:", round(auc$auc[[1]], 4)))
+    auc_list <- append(auc_list,list(auc))
+    roc_validation <- append(roc_validation, 
+                             list( plot.roc(auc, 
+                                   ylim=c(0,1),  
+                                   type = "S" , 
+                                   print.thres = TRUE, 
+                                   main=paste('Validation AUC:', round(auc$auc[[1]], 4)))
+                                  )
+                             )
+  }
+}
+```
+
+```{r}
+roc.test(roc_validation[[1]],roc_validation[[6]])
+plot.roc(auc_list[[1]], type = "S", col="#1c61b6")
+lines.roc(auc_list[[4]], type = "S", col="#008600")
+rm(auc_list, roc_validation, auc, train, val, model, predictionValidationProb)
+```
+
+Observamos de nuevo que en este pequeño subconjunto se mantiene más o menos igual, consiguiendo incluso una ligera mejora (casi innotable) eliminando más columnas. Probablemente, al ser tan pequeño el subconjunto no se observan grandes diferencias y nos estamos confiando. Sin embargo, priorizamos la eliminación masiva para que nuestro ordenador pueda entrenar el modelo a pesar de tener que sacrificar datos relevantes.
+```{r results = 'hide'}
+# Eliminamos las distintas variables del conjunto total, así como de los subconjuntos
+subset_train <- remove_nuls(0.7, 0.7, status, subset_train, data_new)
+subset_val <- subset_val %>% select(one_of(names(subset_train)))
+data_new <- data_new %>% select(one_of(names(subset_train)))
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+```{r}
+status
+```
+
+Análogamente se selecciona las características con poca diversidad, en las que el valor principal no coincida en un determinado porcentaje con el valor de ausencia de fraude. Descartando, sin embargo, los valores que son casi todos iguales. Descartando, sin embargo, los valores únicos o que acaparan casi toda la información de la columna.
+```{r messages=FALSE}
+# prob ∈ [0,1]: Proporción de valores únicos.
+# prob_isFraud ∈ [0,1]: Porcentaje de coincidencia con la etiqueta.
+# status: Estado de las variables considerando el conjunto completo.
+# data_uniq: Conjunto del que queremos eliminar las variables seleccionadas.
+# data_total: Conjunto de datos total del que extraeremos la información.
+remove_uniq <- function(prob, prob_isFraud, status, data_uniq, data_total){
+  # Seleccionamos las columnas con
+  ##   - valores únicos
+  uniq_cols <- status %>%
+              filter(unique < 2) %>%
+              select(variable)
+  # Eliminamos dichas variables
+  data_uniq <- data_uniq %>%
+               select(-one_of(uniq_cols$variable))
+  status <- df_status(data_total[,names(data_uniq)])
+  
+  ##   - poca variabilidad
+  n.rows <- nrow(data_total)
+  max_unique <- prob * n.rows
+  var_cols <- status %>%
+              filter(p_zeros < 60) %>%
+              filter(unique < max_unique) %>%
+              select(variable)
+
+  # Seleccionamos las columnas que coincidan en un determinado porcentaje el valor principal con la posicion de ausencia de fraude
+  coincidence <- c()
+  for (x in var_cols$variable) {
+    col_var <- data_total[,x]
+    x.obs <- names(which.max(table(col_var)))
+    
+    col_max_obs <- rep(-1, nrow(col_var))
+    col_max_obs[col_var==x.obs] <- 0
+    
+    # Eliminamos las variables que tienen una probabilidad de coincidencia mayor de prob_isFraud pero menor del 95%
+    p.coincidence <- sum(data_total[,"isFraud"]==col_max_obs, na.rm=TRUE)/n.rows
+    if(p.coincidence < prob_isFraud || p.coincidence > 0.95)
+      coincidence <- c(coincidence, x)
+  }
+  
+  # Eliminamos dichas variables
+  data_uniq <- data_uniq %>%
+               select(-one_of(coincidence))
+  
+  return(data_uniq)
+}
+```
+
+```{r results = 'hide'}
+auc_list <- list()
+roc_validation <- list()
+
+for (p in c(0.001, 0.01, 0.1)) {
+  for (p_fraud in c(0.6,0.7)) {
+    print(c("Probabilidad:", p))
+    print(c("Probabilidad de coincidir con la columna de fraude:", p_fraud))
+    train <- remove_uniq(p, p_fraud, status, subset_train, data_new)
+    print(c(" - Columnas eliminadas:", ncol(subset_train)-ncol(train)))
+    model <- rf(train)
+    val <- subset_val[, names(train)]
+    predictionValidationProb <- predict(model, val, type = "prob")
+    
+    auc <- roc(val$isFraud, predictionValidationProb[["Yes"]])
+    print(c(" - AUC:", round(auc$auc[[1]], 4)))
+    auc_list <- append(auc_list,list(auc))
+    roc_validation <- append(roc_validation, 
+                             list( plot.roc(auc, 
+                                   ylim=c(0,1),  
+                                   type = "S" , 
+                                   print.thres = TRUE, 
+                                   main=paste('Validation AUC:', round(auc$auc[[1]], 4)))
+                                  )
+                             )
+  }
+}
+```
+
+```{r}
+roc.test(roc_validation[[1]],roc_validation[[6]])
+plot.roc(auc_list[[1]], type = "S", col="#1c61b6")
+lines.roc(auc_list[[6]], type = "S", col="#008600")
+rm(auc_list, roc_validation, auc, train, val, model, predictionValidationProb)
+```
+
+En este caso, se empieza a notar la perdida de calidad al eliminar columnas, por lo que seleccionamos la opción que nos elimina menos columnas aunque la diferencia sea pequeña. Sin embargo, debemos proseguir en nuestra eliminación de características para poder entrenar con un conjunto mayor.
+```{r results = 'hide'}
+# Eliminamos las distintas variables del conjunto total, así como de los subconjuntos
+subset_train <- remove_uniq(0.001, 0.6, status, subset_train, data_new)
+subset_val <- subset_val %>% select(one_of(names(subset_train)))
+data_new <- data_new %>% select(one_of(names(subset_train)))
+
+# Actualizamos la variable de estado
+status <- df_status(data_new)
+```
+```{r}
+status
+```
+
+### Selección de ejemplos
+
+En esta sección se ha decidido empezar a eliminar ejemplos con una gran cantidad de valores perdidos para poder estudiar la correlación en el próximo apartado, intentando disminuir el ruido que deberemos insertarle al tener que imputar valores.
+```{r results = 'hide'}
+# Eliminamos filas con mas del 80% de NAs
+data_new <- data_new[which(rowMeans(!is.na(data_new)) > 0.8), ]
+```
+
+### Normalización 
+A continuación procedemos a normalizar los datos, es decir, transformar los rangos de sus variables al intervalo [0,1]. Hacemos esta normalización para igualar los rangos en que se mueven las variables para facilitar visualizar la relación entre ellas.
+
+Pero antes de ello debemos realizar una imputación de valores perdidos para poder calcular las distintas correlaciones en la sección siguiente. En este caso, realizamos una imputación rápida de forma aleatoria debido a la enorme cantidad de valores perdidos. Además la correlación se realiza trabajando variables numéricas y nos queda una variable de tipo carácter con dos valores ("Found" y "NotFound") y una lógica. Por tanto, vamos a transformarla en tipo numérica modificando `Found` por el valor 1 y `NotFound` por 0, asi como la variable lógica.
+
+```{r results='hide'}
+data_bit_clear <- data_bit_clear %>%
+                  mutate(id_12 = as.numeric(ifelse(id_12 == 'Found', 1, 0))) %>%
+                  mutate(id_36 = as.numeric(ifelse(id_36 == 'TRUE', 1, 0)))
+df_status(data_bit_clear)
+```
+
+```{r results='hide', warning=FALSE}
+subset_na <- data_bit_clear %>%
+             select_if(function(col) any(is.na(col)))
+
+# Realizamos un remplazamiento aleatorio considerando la columna completa
+for (var in names(subset_na)) {
+  missing <- (is.na(subset_na[,var])) # Vector booleano
+  n.missing <- sum(missing) # Número de NA’s
+  #x.obs <- data_total[!missing, var] 
+  x.obs <- sapply(names(table(data_bit_clear[,var])), as.integer) # Datos no NA considerando el conjunto completo
+  data_bit_clear[missing,var] <- sample(x.obs, n.missing, replace = T)
+}
+
+rm(subset_na, var, missing, n.missing, x.obs)
+any(is.na(data_bit_clear))
+```
+
+
+Para ello, vamos a utilizar la librería `BBmisc` y la función `normalize` con el método range que por defecto normaliza al rango [0,1].
+```{r message=FALSE}
+library(BBmisc)
+```
+```{r}
+data_bit_clear <- data_bit_clear[data_bit_clear$TransactionID %in% data_new$TransactionID, names(data_new)]
+data_new_num <- subset_na <- data_bit_clear %>% 
+                             select(-one_of(c("TransactionID", "isFraud"))) %>%
+                             select_if(is.numeric)
+data_bit_clear[,names(data_new_num)] <- normalize(data_new_num, method = "range")
+
+rm(data_new_num)
+```
+
+### Variables correladas
+
+A continuación se estudia la correlación entre las variables, es decir, si existe alguna dependencia directa o inversa entre alguna pareja de variables. El objetivo es eliminar variables que tengan una alta dependencia de otra ya que no aportan información nueva al conjunto de datos.
+
+Para estudiar la correlación se utiliza la librería `corrplot` que nos permite visualizarla gráficamente.
+
+```{r message=FALSE}
+library(corrplot)
+```
+
+Con todo preprado, pasamos a estudiar la correlación.
+```{r mesage=FALSE}
+# Seleccionamos las variables numéricas
+data_corr <- data_bit_clear  %>% 
+             select(-one_of(c("TransactionID", "isFraud")))
+
+# Creamos la matriz de correlación de los datos teniendo en cuenta los NAs del conjunto
+table_corr <- cor(data_corr)
+
+# Dibujamos la matriz con el método de color y con el tamaño de las etiquetas a 0.1
+corrplot(table_corr, method = "color", tl.cex = 0.1)
+```
+
+Podemos observar que existen bastante variables correladas. Procedemos, por tanto, a eliminar aquellas que están fuertemente correladas y actualizar los diferentes conjuntos.
+```{r results='hide'}
+# Cambiamos a cero la diagonal y la parte superior de la matriz para evitar eliminar todas las variables
+table_corr[upper.tri(table_corr)] <- 0
+diag(table_corr) <- 0
+data_new <- data_bit_clear[,-which(apply(table_corr,2, function(x) any(x > 0.8)))]
+rm(table_corr, data_corr)
+
+# Actualizamos valores
+data_new <- data_new %>%
+            mutate(isFraud = as.factor(ifelse(isFraud == 1, 'Yes', 'No')))
+subset_train <- data_new[data_new$TransactionID %in% data_train_ID, ]
+subset_val <- data_new[data_new$TransactionID %in%  data_val_ID, ]
+
+status <- df_status(data_new)
+```
+
+```{r}
+status
+```
+
+Comprobamos que se mantiene aproximadamente el valor AUC.
+```{r}
+model <- rf(subset_train)
+predictionValidationProb <- predict(model, subset_val, type = "prob")
+
+auc <- roc(subset_val$isFraud, predictionValidationProb[["Yes"]])
+roc_validation <- plot.roc(auc, 
+                           ylim=c(0,1),  
+                           type = "S" , 
+                           print.thres = TRUE, 
+                           main=paste('Validation AUC:', round(auc$auc[[1]], 4))
+                          )
+
+
+rm(model, predictionValidationProb, roc_validation, auc, data_bit_clear, status)
+```
+
+
+
+### Análisis de componentes principales
+
+En este apartado, se procede a realizar una reducción final de características con una técnica más avanzada. Para realizar la reducción, PCA va a obtener nuevos atributos (componentes principales), los cuales serán combinaciones lineales de los atributos originales, que serán además capaces de explicar la mayor parte de la varianza (entorno al 90%) de los atributos originales.
+
+Dicho esto aplicamos las transformaciones sobre los datos con la función `prcomp`. Vamos a ejecutar dicha función con un valor de rank de 50, con esto indicamos que queremos reducir a 50 el total de atributos. Así
+obtendremos un objeto de transformación que utilizaremos para obtener los nuevos conjuntos.
+
+
+```{r}
+# Almacenamos primero las columnas que se han mantenido después de las sucesivas eliminaciones
+cols <- names(data_new)
+save(cols, file=".tmp/columns.RData")
+rm(cols)
+
+#Realizamos las transformaciones sobre los datos.
+data_pca <- data_new  %>% 
+            select(-one_of(c("TransactionID", "isFraud")))
+object_pca <- prcomp(data_pca, scale = FALSE, rank = 10)
+data_new <- cbind(data_new[,c("TransactionID", "isFraud")], as.data.frame(predict(object_pca, data_pca)))
+
+# Almacenamos el objeto PCA y el nuevo conjunto de datos
+save(object_pca, file=".tmp/PCA.RData")
+write_csv(data_new, ".tmp/data_final.csv")
+
+# Actualizamos los subconjuntos
+subset_train <- data_new[data_new$TransactionID %in% data_train_ID, ]
+subset_val <- data_new[data_new$TransactionID %in%  data_val_ID, ]
+
+rm(object_pca, data_pca)
+```
+
+
+## Comparación de modelos (subconjunto)
+
+Una vez terminado el preprocesamiento pasamos a observar cómo se comportan los distintos algoritmos de predicción para hacernos una idea de qué es lo que nos podemos esperar de ellos.
+
+* **Random Forest**
+```{r}
+model_rf <- rf(subset_train)
+predictionValidationProb <- predict(model_rf, subset_val, type = "prob")
+
+auc_rf <- roc(subset_val$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_rf <- plot.roc(auc_rf, 
+                              ylim=c(0,1),  
+                              type = "S" , 
+                              print.thres = TRUE, 
+                              main=paste('Validation AUC:', round(auc_rf$auc[[1]], 4))
+                             )
+
+pred_rf.train = predict(model_rf, subset_train, type = "raw")
+pred_rf.val = predict(model_rf, subset_val, type = "raw")
+
+# Tabla de confusion.
+table(pred_rf.train, subset_train$isFraud)
+table(pred_rf.val, subset_val$isFraud)
+
+rm(model_rf, predictionValidationProb)
+```
+
+* **Naïve Bayes**
+```{r warning=FALSE}
+nb <- function(subset) {
+  # Paralelización del proceso
+  registerDoMC(cores = 2)
+  
+  # Definición del entrenamiento
+  ctrl <- trainControl(summaryFunction = twoClassSummary, classProbs = TRUE, allowParallel = TRUE)
+  
+  ## - Naive Bayes
+  nbParametersGrid <- data.frame(usekernel = FALSE, fL = 0 , adjust = 0)
+  nb_tune <- data.frame(usekernel =TRUE, fL = 0)
+  # Ajuste del modelo 
+  set.seed(15)
+  model_nb <- train(isFraud ~ ., 
+                     data = subset,
+                     method = "nb",
+                     metric = "ROC",
+                     trControl = ctrl,
+                     tuneGrid = nbParametersGrid)
+  return(model_nb)
+}
+# Almacenamos dicha función
+save(nb,  file=".tmp/NaiveBayes.RData")
+```
+
+```{r warning=FALSE}
+model_nb <- nb(subset_train)
+
+predictionValidationProb <- predict(model_nb, subset_val, type = "prob")
+
+auc_nb <- roc(subset_val$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_nb <- plot.roc(auc_nb, 
+                              ylim=c(0,1),  
+                              type = "S" , 
+                              print.thres = TRUE, 
+                              main=paste('Validation AUC:', round(auc_nb$auc[[1]], 4))
+                              )
+
+pred_nb.train = predict(model_nb, subset_train, type = "raw")
+pred_nb.val = predict(model_nb, subset_val, type = "raw")
+
+# Tabla de confusion.
+table(pred_nb.train, subset_train$isFraud)
+table(pred_nb.val, subset_val$isFraud)
+
+
+rm(model_nb, predictionValidationProb)
+```
+
+* **SVM**
+En este caso, realizamos una pequeña selección de parámetros previa para estimar los mejores parámetros utilizando SVM con _kernel_ radial, pero sin realizar validación cruzada.
+```{r warning=FALSE}
+# Paralelización del proceso
+registerDoMC(cores = 2)
+
+# Definición del entrenamiento
+ctrl <- trainControl(summaryFunction = twoClassSummary, classProbs = TRUE, allowParallel = TRUE)
+
+## - SVM
+set.seed(15)
+# 0.06609042 - parámetro por defecto de svmRadial
+svmParametersGrid <- expand.grid(sigma = c(0.01, 0.1, 0.06609042,1),
+                                  C = c(1, 5, 10))
+model_svm <- train(isFraud ~ .,
+                   data = subset_train,
+                   method = "svmRadial",
+                   metric = "ROC",
+                   tuneGrid = svmParametersGrid,
+                   trControl = ctrl)
+model_svm
+```
+
+Se ha obtenido mejores resultado con $\sigma$ siendo igual al valor por defecto de 0.06609042 y C igual a 1.
+```{r}
+svm <- function(subset) {
+# Paralelización del proceso
+registerDoMC(cores = 2)
+
+# Definición del entrenamiento
+ctrl <- trainControl(summaryFunction = twoClassSummary, classProbs = TRUE, allowParallel = TRUE)
+
+## - SVM
+set.seed(15)
+svmParametersGrid <- expand.grid(sigma = c(0.06609042),
+                                  C = c(1))
+model_svm <- train(isFraud ~ .,
+                   data = subset,
+                   method = "svmRadial",
+                   tuneGrid = svmParametersGrid,
+                   metric = "ROC",
+                   trControl = ctrl)
+}
+# Almacenamos dicha función
+save(svm,  file=".tmp/SVM.RData")
+```
+
+```{r}
+model_svm <- svm(subset_train)
+predictionValidationProb <- predict(model_svm, subset_val, type = "prob")
+
+auc_svm <- roc(subset_val$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_svm <- plot.roc(auc_svm, 
+                               ylim=c(0,1),  
+                               type = "S" , 
+                               print.thres = TRUE, 
+                               main=paste('Validation AUC:', round(auc_svm$auc[[1]], 4))
+                               )
+
+pred_svm.train = predict(model_svm, subset_train, type = "raw")
+pred_svm.val = predict(model_svm, subset_val, type = "raw")
+
+# Tabla de confusion.
+table(pred_svm.train, subset_train$isFraud)
+table(pred_svm.val, subset_val$isFraud)
+
+
+rm(model_svm, predictionValidationProb)
+```
+
+[**> Viaja a la siguiente parte**](fraud-detection-part4.html)
+
+
+
+<script type="text/javascript">
+  <!-- https://stackoverflow.com/questions/39281266/use-internal-links-in-rmarkdown-html-output/39293457 -->
+  // When the document is fully rendered...
+  $(document).ready(function() {
+    // ...select all header elements...
+    $('h1, h2, h3, h4, h5').each(function() {
+      // ...and add an id to them corresponding to their 'titles'
+      $(this).attr('id', $(this).html());
+    });
+  });
+</script>
