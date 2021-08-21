@@ -1,0 +1,373 @@
+---
+title: "Preprocesamiento y clasificación con conjunto de datos de detección de transacciones fraudulentas (4ª Parte)"
+author: "Mª del Mar Alguacil Camarero"
+output:
+  html_document:
+    df_print: paged
+html_notebook: default
+---
+
+<br/>
+**Índice**
+
+[1ª Parte](fraud-detection-part1.html)
+
+* [Introducción](fraud-detection-part1.html#Introducción)
+* [Estado del conjunto de datos](fraud-detection-part1.html#Estado del conjunto de datos)
+* [Selección subconjunto](fraud-detection-part1.html#Selección subconjunto)
+
+[2ª Parte](fraud-detection-part2.html)
+
+* [Estudio previo](fraud-detection-part2.html#Estudio previo)
+  * [Imputación de datos perdidos](fraud-detection-part2.html#Imputación de datos perdidos)
+  * [Predicciones subconjunto](fraud-detection-part2.html#Predicciones subconjunto)
+  
+[3ª Parte](fraud-detection-part3.html)
+
+* [Preprocesamiento](fraud-detection-part3.html#Preprocesamiento)
+  * [Variables con valores perdidos](fraud-detection-part3.html#Variables con valores perdidos)
+  * [Variables con mucha diversidad en sus valores](fraud-detection-part3.html#Variables con mucha diversidad en sus valores)
+  * [Tratamiento de valores atípicos](fraud-detection-part3.html#Tratamiento de valores atípicos)
+  * [Variables con poca diversidad en sus valores](fraud-detection-part3.html#Variables con poca diversidad en sus valores)
+  * [Selección de ejemplos](fraud-detection-part3.html#Selección de ejemplos)
+  * [Normalización](fraud-detection-part3.html#Normalización)
+  * [Variables correladas](fraud-detection-part3.html#Variables correladas)
+  * [Análisis de componentes principales](fraud-detection-part3.html#Análisis de componentes principales)
+* [Comparación de modelos (subconjunto)](fraud-detection-part3.html#Comparación de modelos (subconjunto))
+
+[4ª Parte](fraud-detection-part4.html)
+
+* [Balanceo de clases](#Balanceo de clases)
+* [Entrenamiento](#Entrenamiento)
+* [Predicción](#Predicción)
+  * [Random Forest](#Random Forest)
+  * [Naïve Bayes](#Naïve Bayes)
+  * [Máquinas de Vectores de Soporte](#Máquinas de Vectores de Soporte)
+* [Discusión de resultados](#Discusión de resultados)
+* [Conclusiones](#Conclusiones)
+
+
+## Balanceo de clases
+
+En esta sección, se procede a realizar a realizar el balanceo de clases para que evitar que el predictor siempre opte por la clase mayoritaria.
+
+Pero, como en partes anteriores, debemos cargar los archivos necesarios para poder trabajar con ellos.
+
+```{r message=FALSE}
+library(tidyverse)
+library(funModeling)
+library(caret)
+```
+  
+```{r results = 'hide'}
+# Conjunto de datos de entrenamiento preprocesado  
+data_train <- read_csv('.tmp/data_final.csv')
+```
+
+Debido a la gran cantidad de datos que la que disponemos, teniendo que ser procesado en una máquina convencional, se ha optado por realizar el balanceo reduciendo las muestras de la clase mayoritaria para poder crear un modelo de predicción en un tiempo razonable a pesar de la pérdida de precisión que se pueda obtener. Para ello, se utilizará la técnica de _downsampling_ estableciendo una semilla para la selección aleatoria, eliminando las filas restantes de la clase mayoritaria hasta obtener la misma cantidad de ejemplos de ambas clases.
+
+```{r}
+# Cambiamos la variable de fraude a tipo factor
+data_train$isFraud <- as.factor(data_train$isFraud)
+
+# Downsampling para igualar el número de filas pertenecientes a cada clase
+set.seed(15)
+predictors <- data_train %>% select(-one_of("isFraud"))
+data_train <- downSample(x = predictors, y = data_train$isFraud, yname = 'isFraud')
+
+# Comprobación
+count(data_train, isFraud)
+rm(predictors)
+```
+
+## Entrenamiento
+
+Una vez tenemos los datos preparados procedemos a utilizar los distintos modelos de predicción para, en base a las características de cada ejemplo, intentar predecir si es una transacción fraudulenta o no. Como ya se anticipó anteriormente, se utilizará los algoritmos de Naive Bayes, Random Forest y SVM con los parámetros seleccionados considerando el subconjunto. Aunque lo idea sería dividir en dividir de nuevo el subconjunto en uno de entrenamiento y otro de validación y escoger el mejor modelo realizando validación cruzada.
+
+```{r message=FALSE}
+library(doMC)
+library(pROC)
+
+load(".tmp/RandomForest.RData")
+load(".tmp/NaiveBayes.RData")
+load(".tmp/SVM.RData")
+```
+
+### Random Forest
+
+Construimos un modelo a partir de algoritmo de clasificacón Random Forest es una técnica que utiliza _bootstrap_. Random Forest genera x muestras de entrenamiento del mismo tamaño que la
+muestra de entrenamiento original mediante remuestreo con reemplazamiento y construye x árboles (uno a partir de cada muestra). Finalmente, se obtiene un promedio de los árboles obtenidos para reducir la varianza. Ahora bien, Random Forest, a la hora de realizar cada partición en la construcción de cada árbol selecciona el predictor (atributo) a utilizar de un conjunto de m predictores seleccionados aleatoriamente de entre los p predictores totales. Esto permite construir árboles no correlados, lo cual soluciona el problema de que todos o la mayoría de los árboles tendrán al mejor predictor o predictores en sus niveles superiores para particionar el conjunto de datos. Y como el promedio de cantidades altamente correladas no reduce mucho la varianza, Random Forest descorrela los árboles generados obteniendo una gran reducción en la varianza.
+
+```{r}
+if (file.exists(".tmp/modelRF.RData")) {
+  load(".tmp/modelRF.RData")
+} else {
+  model_rf <- rf(data_train)
+  save(model_rf,  file=".tmp/modelRF.RData")
+}
+```
+```{r}
+predictionValidationProb <- predict(model_rf, data_train, type = "prob")
+
+auc_rf <- roc(data_train$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_rf <- plot.roc(auc_rf, 
+                              ylim=c(0,1),  
+                              type = "S" , 
+                              print.thres = TRUE, 
+                              main=paste('Validation AUC:', round(auc_rf$auc[[1]], 4))
+                             )
+
+pred_rf.train <- predict(model_rf, data_train, type = "raw")
+
+# Tabla de confusion.
+table(pred_rf.train, data_train$isFraud)
+
+rm(predictionValidationProb, pred_rf.train, roc_validation_rf)
+```
+
+### Naïve Bayes
+
+A continuación se intenta entrenar un modelo que se ajuste a los datos usando clasificación Bayesiana, esta se basa en la idea de que no es seguro de a que clase pertenece una transacción, sino que tendrá una probabilidad de pertenencia.
+
+```{r}
+if (file.exists(".tmp/modelNB.RData")) {
+  load(".tmp/modelNB.RData")
+} else {
+  model_nb <- nb(data_train)
+  save(model_nb,  file=".tmp/modelNB.RData")
+}
+```
+```{r warning=FALSE}
+predictionValidationProb <- predict(model_nb, data_train, type = "prob")
+
+auc_nb <- roc(data_train$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_nb <- plot.roc(auc_nb, 
+                              ylim=c(0,1),  
+                              type = "S" , 
+                              print.thres = TRUE, 
+                              main=paste('Validation AUC:', round(auc_nb$auc[[1]], 4))
+                              )
+
+pred_nb.train <- predict(model_nb, data_train, type = "raw")
+
+# Tabla de confusion.
+table(pred_nb.train, data_train$isFraud)
+
+rm(predictionValidationProb, pred_nb.train, roc_validation_nb)
+```
+
+### Máquinas de Vectores de Soporte
+
+Por último, aplicamo el algortimo de aprendizaje supervisado SVM (_Support Vector Machine_). Este algoritmo calcula un hiperplano que divide los datos (representados como un vector de pesos para cada atributo junto a sus etiquetas correspondientes) dejando el máximo margen posible entre el hiperplano y los puntos que representan cada uno de los datos del conjunto de entrenamiento. En este caso, sólo se ha empleado el _kernel_ radial.
+
+```{r}
+if (file.exists(".tmp/modelSVM.RData")) {
+  load(".tmp/modelSVM.RData")
+} else {
+  model_svm <- svm(data_train)
+  save(model_svm,  file=".tmp/modelSVM.RData")
+}
+```
+```{r}
+predictionValidationProb <- predict(model_svm, data_train, type = "prob")
+
+auc_svm <- roc(data_train$isFraud, predictionValidationProb[["Yes"]])
+roc_validation_svm <- plot.roc(auc_svm, 
+                               ylim=c(0,1),  
+                               type = "S" , 
+                               print.thres = TRUE, 
+                               main=paste('Validation AUC:', round(auc_svm$auc[[1]], 4))
+                               )
+
+pred_svm.train <- predict(model_svm, data_train, type = "raw")
+
+# Tabla de confusion.
+table(pred_svm.train, data_train$isFraud)
+
+rm(predictionValidationProb, pred_svm.train, roc_validation_svm)
+```
+
+```{r}
+rm(data_train)
+```
+
+## Predicción
+
+Para poder trabajar con el _dataset_ de prueba debemos proceder a eliminar las columnas que se estimaron oportunas en el preprocesamientos, además de rellenar los valores perdidos para poder aplicarle la transformación del PCA.
+
+1. Extraemos y combinamos los datos considerando todos los ejemplos del dataset.
+```{r}
+data_folder <- normalizePath(file.path("..", "data"))
+```
+
+```{r results = 'hide'}
+if (file.exists(".tmp/join_test.csv")) {
+  # Conjunto de datos de prueba unido
+  data_test <- read_csv('.tmp/join_test.csv')
+  status <- df_status(data_test)
+} else {
+  # Conjunto de datos de prueba
+  data_test_identity <- read_csv(paste(data_folder,'test_identity.csv', sep='/'))
+  data_test_transaction <- read_csv(paste(data_folder,'test_transaction.csv', sep='/'))
+  # Combinamos teniendo en cuenta todos las observaciones del dataset
+  data_test <- merge(data_test_transaction, data_test_identity, by="TransactionID", all.x=TRUE)
+  
+  write_csv(data_test, ".tmp/join_test.csv")
+  
+  rm(data_test_identity, data_test_transaction)
+  status <- df_status(data_test)
+}
+```
+
+Comprobamos que existe un identificador para los distintos ejemplos.
+```{r}
+dim(data_test)
+status
+rm(status)
+```
+ 
+2. Eliminamos las columnas ``innecesarias''.
+```{r results = 'hide', eval=FALSE}
+# Columnas a mantener
+load(".tmp/columns.RData")
+```
+
+```{r results='hide', eval=FALSE}
+# A diferencia del dataset de entrenamiento, las variables 'id' van seguidas por un guión en vez de una barra baja
+cols_test <- gsub("_", "-", cols[-which(cols=="isFraud")])
+
+# Extraemos las características seleccionadas
+data_test <- data_test %>% select(one_of(cols_test))
+```
+
+3. Transformamos las características a partir del objeto PCA creado mediante el conjunto de entrenamiento. Sin embargo, previamente debemos normalizar e imputar valores perdidos. En este caso, se ha decido realizar una imputación simple y rápida de forma totalmente aleatoria debido a la enorme cantidad de valores perdidos que hay.
+```{r message=FALSE, eval=FALSE}
+library(BBmisc)
+```
+```{r results = 'hide', eval=FALSE}
+# Objeto PCA
+load(".tmp/PCA.RData")
+```
+
+```{r eval=FALSE}
+# Modificamos el nombre de las columnas para poder trabajar con ellas
+colnames(data_test) <- cols[-which(cols=="isFraud")]
+rm(cols, cols_test)
+
+# Transformamos a variable numérica la variable 'id_12'
+data_test <- data_test %>%
+             mutate(id_12 = as.numeric(ifelse(id_12 == 'Found', 1, 0)))
+data_test$id_36 <- as.numeric(data_test$id_36)
+
+# Estimamos valores perdidos aleatoriamente
+for (var in names(data_test)) {
+  missing <- (is.na(data_test[,var])) # Vector booleano
+  n.missing <- sum(missing) # Número de NAs
+  #x.obs <- data_total[!missing, var] 
+  x.obs <- sapply(names(table(data_test[,var])), as.integer) # Datos no NA
+  data_test[missing,var] <- sample(x.obs, n.missing, replace = T)
+}
+rm(missing, n.missing, x.obs, var)
+
+# Normalizamos
+load(".tmp/min_columns.RData")
+load(".tmp/max_columns.RData")
+data_test_pca <- data_test %>% select(-one_of("TransactionID"))
+for (var in colnames(data_test)){
+  data_test_pca[var] <- (data_test[var] - min_columns[var])/(max_columns[var] - min_columns[var])
+}
+
+# PCA
+data_test <- cbind(data_test$TransactionID, as.data.frame(predict(object_pca, data_test_pca)))
+colnames(data_test)[1] <- "TransactionID"
+rm(data_test_pca, object_pca)
+```
+
+4. Realizamos la predicción con cada uno de los modelos entrenados.
+
+```{r eval=FALSE}
+# Creamos la carpeta results si no existe
+dir.create('../results', showWarnings = FALSE)
+```
+
+  * Random Forest
+
+```{r eval=FALSE}
+pred_rf.test = predict(model_rf, data_test, type = "raw")
+
+pred_table_rf.test <- select(data_test, TransactionID) %>%
+                      mutate(isFraud = ifelse(pred_rf.test=='Yes', 1, 0))
+   
+write_csv(pred_table_rf.test, "../results/pred_rf.csv")
+```  
+
+![Resultados predicción Random Forest.](../results/images/rf_test-.png)
+
+  * Naïve Bayes
+```{r eval=FALSE}
+pred_nb.test <- predict(model_nb, data_test, type = "raw")
+
+pred_table_nb.test <- select(data_test, TransactionID) %>%
+                      mutate(isFraud = ifelse(pred_nb.test=='Yes', 1, 0))
+   
+write_csv(pred_table_nb.test, "../results/pred_nb.csv")
+```  
+  
+![Resultados predicción Naive Bayes.](../results/images/nb_test-.png)
+  * SVM
+  
+```{r eval=FALSE}
+pred_svm.test = predict(model_svm, data_test, type = "raw")
+
+pred_table_svm.test <- select(data_test, TransactionID) %>%
+                       mutate(isFraud = ifelse(pred_svm.test=='Yes', 1, 0))
+   
+write_csv(pred_table_svm.test, "../results/pred_svm.csv")
+``` 
+
+![Resultados predicción SVM.](../results/images/svm_test-.png)
+
+## Discusión de resultados
+
+```{r echo=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+```
+```{r echo = FALSE}
+df <- matrix(c(round(auc_rf$auc[[1]], 4), "0.566485", round(auc_nb$auc[[1]],4), "0.684929", round(auc_svm$auc[[1]],4), "0.700582"), nrow = 2, dimnames = list(c("Train","Test"), c("Random Forest","Naive Bayes", "SVM")))
+kable(df, "html", align = "c")  %>% 
+  kable_styling(bootstrap_options = "striped")
+```
+
+En el caso de Random Forest se produjo un sobreajuste en la obtención del modelo, lo que provocó unos resultados debastadores e inesperados en el conjunto de prueba. Sin embargo, los resultados de SVM y Naïve Bayes aún han sido más deseables a pesar de su mayor tiempo de entrenamiento. Con SVM se ha obtenido una puntuación un poco mejor, sin embargo el consumo de tiempo ha sido mucho mayor en comparación con Naïve Bayes.
+
+```{r}
+# Eliminamos la carpeta .tmp
+unlink('.tmp', recursive = TRUE)
+```
+
+## Conclusiones
+
+En esta práctica, se trabajo con un conjunto de datos extremadamente grande para los recursos de los que disponíamos por lo que se debió procesar principalmente a ciegas, intuyendo cuales podrían ser las características que podríamos eliminar sin perder demasiada información. Sin embargo, debiamos sacrificar datos para poder conseguir procesarlos con nuestros ordenadores. Se pudo comprobar la dificultad que se nos presenta en casos más realistas, de verdadera competición, donde tenemos una gran cantidad de características y ejemplos.
+
+Debido a la cantidad masiva de datos se han tenido que proceder a eliminar tanto variables como transacciones, de forma mayoritariamente desesperada e intuitiva. Esto ha permitido ver la dificultad a las que nos enfrentamos cuando queremos procesar conjuntos de datos de gran envergadura.
+
+Los resultados obtenidos no han resultado ser muy buenos debido principalmente al entrenamiento realizado con tan pocos ejemplos. La técnica de _downsampling_ debe ser combinada con la de creación de nuevas transacciones para conseguir balancear correctamente la clase. Sin embargo, uno de los grandes errores que se ha cometido probablemente ha sido mejor haber realizado la poda del 80% de los ejemplos que presentaban valores perdidos. Debido a la falta de tiempo y problemas técnicos con R no se ha podido llegar a deshacer y comprobar esta. 
+
+Por otro lado, la selección de parámetros óptimos se realizó sobre un subconjunto pequeño, sin validación cruzada, lo cual también ha influido notoriamente.
+
+Con todo esto se ha aprendido a ver la importancia del estudio y selección de datos ya que no siempre se dispone de una maquinaria potente para poder manejarlos y procesarlos. Además de que muchas características simplemente ocupan espacio de memoria: no aportar ninguna información o, aún peor, interfieron en el aprendizaje del clasificador. Por lo tanto, el preprocesamiento es crucial para poder obtener buenos resultados. 
+
+[**> Vuelve al inicio**](fraud-detection-part1.html)
+
+<script type="text/javascript">
+  <!-- https://stackoverflow.com/questions/39281266/use-internal-links-in-rmarkdown-html-output/39293457 -->
+  // When the document is fully rendered...
+  $(document).ready(function() {
+    // ...select all header elements...
+    $('h1, h2, h3, h4, h5').each(function() {
+      // ...and add an id to them corresponding to their 'titles'
+      $(this).attr('id', $(this).html());
+    });
+  });
+</script>
