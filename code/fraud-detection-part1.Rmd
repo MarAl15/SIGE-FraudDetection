@@ -119,7 +119,7 @@ status
 ```
 
 
-En el fichero relacionado con las transacciones (_train_transaction_), nos encontramos con 392 variales numéricas, 6 de tipo texto y 8 lógicas.
+En el fichero relacionado con las transacciones (_train_transaction_), nos encontramos con 379 variales numéricas, 6 de tipo texto y 8 lógicas.
 ```{r}
 data_transaction <- read_csv(paste(data_folder,'train_transaction.csv', sep='/'))
 # Número de transacciones x número de variables

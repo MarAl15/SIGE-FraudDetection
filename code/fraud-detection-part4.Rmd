@@ -334,7 +334,7 @@ library(knitr)
 library(kableExtra)
 ```
 ```{r echo = FALSE}
-df <- matrix(c(round(auc_rf$auc[[1]], 4), "0.566485", round(auc_nb$auc[[1]],4), "0.684929", round(auc_svm$auc[[1]],4), "0.700582"), nrow = 2, dimnames = list(c("Train","Test"), c("Random Forest","Naive Bayes", "SVM")))
+df <- matrix(c(round(auc_rf$auc[[1]], 4), "0.637784", round(auc_nb$auc[[1]],4), "0.546096", round(auc_svm$auc[[1]],4), "0.597382"), nrow = 2, dimnames = list(c("Train","Test"), c("Random Forest","Naive Bayes", "SVM")))
 kable(df, "html", align = "c")  %>% 
   kable_styling(bootstrap_options = "striped")
 ```

@@ -391,6 +391,29 @@ table(pred_svm.train, data_train$isFraud)</code></pre>
 ## ── Column specification ────────────────────────────────────────────────────────
 ## cols(
 ##   .default = col_double(),
+##   `id-12` = col_character(),
+##   `id-15` = col_character(),
+##   `id-16` = col_character(),
+##   `id-23` = col_character(),
+##   `id-27` = col_character(),
+##   `id-28` = col_character(),
+##   `id-29` = col_character(),
+##   `id-30` = col_character(),
+##   `id-31` = col_character(),
+##   `id-33` = col_character(),
+##   `id-34` = col_character(),
+##   `id-35` = col_logical(),
+##   `id-36` = col_logical(),
+##   `id-37` = col_logical(),
+##   `id-38` = col_logical(),
+##   DeviceType = col_character(),
+##   DeviceInfo = col_character()
+## )
+## ℹ Use `spec()` for the full column specifications.</code></pre>
+<pre><code>## 
+## ── Column specification ────────────────────────────────────────────────────────
+## cols(
+##   .default = col_double(),
 ##   ProductCD = col_character(),
 ##   card4 = col_character(),
 ##   card6 = col_character(),
@@ -404,14 +427,7 @@ table(pred_svm.train, data_train$isFraud)</code></pre>
 ##   M6 = col_logical(),
 ##   M7 = col_logical(),
 ##   M8 = col_logical(),
-##   M9 = col_logical(),
-##   `id-12` = col_character(),
-##   `id-15` = col_character(),
-##   `id-16` = col_character(),
-##   `id-23` = col_character(),
-##   `id-27` = col_character(),
-##   `id-28` = col_character()
-##   # ... with 11 more columns
+##   M9 = col_logical()
 ## )
 ## ℹ Use `spec()` for the full column specifications.</code></pre>
 <p>Comprobamos que existe un identificador para los distintos ejemplos.</p>
@@ -548,13 +564,13 @@ Train
 Test
 </td>
 <td style="text-align:center;">
-0.566485
+0.637784
 </td>
 <td style="text-align:center;">
-0.684929
+0.546096
 </td>
 <td style="text-align:center;">
-0.700582
+0.597382
 </td>
 </tr>
 </tbody>
